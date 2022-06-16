@@ -3,7 +3,7 @@
   "chainVersions": "kusamaVersions.json",
   "typesBundle": "kusama",
   "events": [
-    "balances.Transfer"
+    "Balances.Transfer"
   ],
   "calls": []
 }

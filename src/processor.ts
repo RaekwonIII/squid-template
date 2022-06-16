@@ -1,14 +1,14 @@
 import * as ss58 from "@subsquid/ss58";
-import {
-  EventHandlerContext,
-  Store,
-  SubstrateProcessor,
-} from "@subsquid/substrate-processor";
+import { SubstrateProcessor, toHex } from "@subsquid/substrate-processor";
 import { lookupArchive } from "@subsquid/archive-registry";
+import { TypeormDatabase, EntityClass, Store } from "@subsquid/typeorm-store";
 import { Account, HistoricalBalance } from "./model";
 import { BalancesTransferEvent } from "./types/events";
+import { EventContext } from "./types/support";
 
-const processor = new SubstrateProcessor("kusama_balances");
+const processor = new SubstrateProcessor(
+  new TypeormDatabase("kusama_balances")
+);
 
 processor.setBatchSize(500);
 processor.setDataSource({
@@ -16,50 +16,60 @@ processor.setDataSource({
   chain: "wss://kusama-rpc.polkadot.io",
 });
 
-const logEvery = process.env.SECRET_LOG_EVERY ? Number(process.env.SECRET_LOG_EVERY) : 30000
-if(logEvery > 0) {
+const logEvery = process.env.SECRET_LOG_EVERY
+  ? Number(process.env.SECRET_LOG_EVERY)
+  : 30000;
+if (logEvery > 0) {
   setInterval(() => {
-    console.log({message: 'test', param1: 'test', ts: new Date()})
-  }, logEvery)
-} else  {
-  console.log({message: 'log every disabled', level: 'warn' })
+    console.log({ message: "test", param1: "test", ts: new Date() });
+  }, logEvery);
+} else {
+  console.log({ message: "log every disabled", level: "warn" });
 }
 
-processor.addEventHandler("balances.Transfer", async (ctx) => {
-  const transfer = getTransferEvent(ctx);
-  const tip = ctx.extrinsic?.tip || 0n;
-  const from = ss58.codec("kusama").encode(transfer.from);
-  const to = ss58.codec("kusama").encode(transfer.to);
+processor.addEventHandler(
+  "Balances.Transfer",
+  {
+    data: {
+      event: { args: true },
+    },
+  } as const,
+  async (ctx) => {
+    const transfer = getTransferEvent(ctx);
+    const timestamp = BigInt(new Date(ctx.block.timestamp).valueOf());
 
-  const fromAcc = await getOrCreate(ctx.store, Account, from);
-  fromAcc.balance = fromAcc.balance || 0n;
-  fromAcc.balance -= transfer.amount;
-  fromAcc.balance -= tip;
-  await ctx.store.save(fromAcc);
+    // ss58.codec("kusama").encode(transfer.from)
+    const fromAcc = await getOrCreate(ctx.store, Account, toHex(transfer.from));
+    fromAcc.wallet = fromAcc.id;
+    fromAcc.balance = fromAcc.balance || 0n;
+    fromAcc.balance -= transfer.amount;
+    await ctx.store.save(fromAcc);
 
-  const toAcc = await getOrCreate(ctx.store, Account, to);
-  toAcc.balance = toAcc.balance || 0n;
-  toAcc.balance += transfer.amount;
-  await ctx.store.save(toAcc);
+    const toAcc = await getOrCreate(ctx.store, Account, toHex(transfer.to));
+    toAcc.wallet = toAcc.id;
+    toAcc.balance = toAcc.balance || 0n;
+    toAcc.balance += transfer.amount;
+    await ctx.store.save(toAcc);
 
-  await ctx.store.save(
-    new HistoricalBalance({
-      id: `${ctx.event.id}-to`,
-      account: fromAcc,
-      balance: fromAcc.balance,
-      date: new Date(ctx.block.timestamp),
-    })
-  );
+    await ctx.store.insert(
+      new HistoricalBalance({
+        id: `${ctx.event.id}-to`,
+        account: fromAcc,
+        balance: fromAcc.balance,
+        timestamp,
+      })
+    );
 
-  await ctx.store.save(
-    new HistoricalBalance({
-      id: `${ctx.event.id}-from`,
-      account: toAcc,
-      balance: toAcc.balance,
-      date: new Date(ctx.block.timestamp),
-    })
-  );
-});
+    await ctx.store.insert(
+      new HistoricalBalance({
+        id: `${ctx.event.id}-from`,
+        account: toAcc,
+        balance: toAcc.balance,
+        timestamp,
+      })
+    );
+  }
+);
 
 processor.run();
 
@@ -69,37 +79,30 @@ interface TransferEvent {
   amount: bigint;
 }
 
-function getTransferEvent(ctx: EventHandlerContext): TransferEvent {
+export function getTransferEvent(ctx: EventContext): TransferEvent {
   const event = new BalancesTransferEvent(ctx);
   if (event.isV1020) {
     const [from, to, amount] = event.asV1020;
     return { from, to, amount };
-  } else if (event.isV1050) {
+  }
+  if (event.isV1050) {
     const [from, to, amount] = event.asV1050;
     return { from, to, amount };
-  } else {
-    const { from, to, amount } = event.asV9130;
-    return { from, to, amount };
   }
+  return event.asV9130;
 }
 
-async function getOrCreate<T extends { id: string }>(
+export async function getOrCreate<T extends { id: string }>(
   store: Store,
-  EntityConstructor: EntityConstructor<T>,
+  EntityClassConstructor: EntityClass<T>,
   id: string
 ): Promise<T> {
-  let entity = await store.get<T>(EntityConstructor, {
-    where: { id },
-  });
+  let entity = await store.findOne<T>(EntityClassConstructor, id);
 
   if (entity == null) {
-    entity = new EntityConstructor();
+    entity = new EntityClassConstructor();
     entity.id = id;
   }
 
   return entity;
 }
-
-type EntityConstructor<T> = {
-  new (...args: any[]): T;
-};
