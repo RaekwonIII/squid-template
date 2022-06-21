@@ -8,9 +8,7 @@ import { Account, HistoricalBalance } from "./model";
 import { BalancesTransferEvent } from "./types/events";
 import { EventContext } from "./types/support";
 
-const processor = new SubstrateProcessor(
-  new TypeormDatabase("kusama_balances")
-);
+const processor = new SubstrateProcessor(new TypeormDatabase());
 
 processor.setBatchSize(500);
 processor.setDataSource({
@@ -26,7 +24,6 @@ async function processTransfers(
   const transfer = getTransferEvent(ctx);
   const timestamp = BigInt(new Date(ctx.block.timestamp).valueOf());
 
-  // ss58.codec("kusama").encode(transfer.from)
   const fromAcc = await getOrCreate(
     ctx.store,
     Account,
